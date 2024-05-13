@@ -3,48 +3,98 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace DistributedIdempotency.Logic
 {
-   
-    public record IdempotentResponse(string Key, DateTime Expiry, IActionResult Response = null, bool IsProcessing = true);
+    public class IdempotentResponse
+    {
+        public IdempotentResponse()
+        {
+
+        }
+        public IdempotentResponse(string key, DateTime expiry)
+        {
+
+            Key = key;
+            Expiry = expiry;
+        }
+        public IdempotentResponse(string key, DateTime expiry, object response, int? statusCode, bool isProcessing)
+        {
+            Key = key;
+            Expiry = expiry;
+            Response = response;
+            IsProcessing = isProcessing;
+            StatusCode = statusCode;
+        }
+        public string Key { get; init; }
+        public DateTime Expiry { get; init; }
+        public object Response { get; init; }
+        public int? StatusCode { get; init; }
+        public bool IsProcessing { get; init; }
+        public DateTime Timestamp { get; init; } = DateTime.Now;
+    }
     public interface IdempotencyService
     {
-        bool CheckForDuplicate(string key);
-        IdempotentResponse GetResponse(string key, int timeoutInMilliseconds);
-        IdempotentResponse Upsert(string key, IActionResult payload = null, bool isProcessing = true, int window = 30000);
-        
+        Task<bool> CheckForDuplicateAsync(string key);
+        Task<IdempotentResponse> GetResponseAsync(string key, int timeoutInMilliseconds);
+        Task<IdempotentResponse> UpsertAsync(string key, IActionResult payload = null, bool isProcessing = true, int window = 30000);
+
     }
-    public class IdempotencyServiceImpl : IdempotencyService
+    internal class IdempotencyServiceImpl(IdempotencyCache cache) : IdempotencyService
     {
-        public static event EventHandler<string> SyncRequest;
-        public bool CheckForDuplicate(string key)
+        IdempotencyCache Cache = cache;
+
+        internal static event EventHandler<string> SyncRequest;
+
+        public async Task<bool> CheckForDuplicateAsync(string key)
         {
-            var duplicateFound =  IdempotencyCache.Contains(key);
+            var duplicateFound = await Cache.Contains(key);
             if (duplicateFound) OnSyncRequested(key);
             return duplicateFound;
         }
-        public IdempotentResponse GetResponse(string key, int timeoutInMilliseconds)
+        public async Task<IdempotentResponse> GetResponseAsync(string key, int timeoutInMilliseconds)
         {
-            var startTime = DateTime.Now;                                                                                                                                                                                                                                                                                                                         
+            var startTime = DateTime.Now;
 
-            while (IdempotencyCache.Contains(key) && IdempotencyCache.Get(key).IsProcessing && IdempotencyCache.Get(key).Response == null && DateTime.Now < startTime.AddMilliseconds(timeoutInMilliseconds) && DateTime.Now < IdempotencyCache.Get(key).Expiry)
+            while (await CheckForInitialResponseAsync(key, startTime, timeoutInMilliseconds))
             {
-                Console.WriteLine($"Checking for duplicate for idempotency key '{key}' ...");
+                Console.WriteLine($"Checking for duplicate's response for idempotency key '{key}' ...");
             }
-            return IdempotencyCache.Get(key);
+            return await Cache.Get(key);
         }
-        public IdempotentResponse Upsert(string key, IActionResult payload = null, bool isProcessing = true, int window = 30000)
+
+        async Task<bool> CheckForInitialResponseAsync(string key, DateTime startTime, int timeoutInMilliseconds)
+        {
+            var cache = await Cache.Get(key);
+            var isInitialTransactionStillProcessing = (cache?.IsProcessing ?? false);// && cache?.Response == null;
+            var isExpired = DateTime.Now < cache?.Expiry;
+            var isWithinDuplicateWindow = DateTime.Now < startTime.AddMilliseconds(timeoutInMilliseconds);
+            return isInitialTransactionStillProcessing && isWithinDuplicateWindow && isExpired;
+        }
+        public async Task<IdempotentResponse> UpsertAsync(string key, IActionResult result = null, bool isProcessing = true, int window = 30000)
         {
             IdempotentResponse idempotentResponse;
-            if (!IdempotencyCache.Contains(key))
+            (object, int?) cachedResponse = (null, null);
+
+            if (result is ObjectResult objectResult)
             {
-                idempotentResponse = new IdempotentResponse(key, DateTime.Now.AddMilliseconds(window), payload, isProcessing);
-                IdempotencyCache.Save(key, idempotentResponse);
+                var resultValue = objectResult.Value;
+                cachedResponse = (resultValue, objectResult.StatusCode);
+            }
+            if (result is StatusCodeResult statusCodeResult)
+            {
+                cachedResponse.Item2 = statusCodeResult.StatusCode;
+            }
+
+
+            if (!await Cache.Contains(key))
+            {
+                idempotentResponse = new IdempotentResponse(key, DateTime.Now.AddMilliseconds(window), cachedResponse.Item1, cachedResponse.Item2, isProcessing);
+                await Cache.Save(key, idempotentResponse);
                 OnSyncRequested(key);
                 return idempotentResponse;
             }
 
-            idempotentResponse = IdempotencyCache.Get(key);
-            idempotentResponse = new IdempotentResponse(key, idempotentResponse.Expiry, payload, isProcessing);
-            IdempotencyCache.Save(key, idempotentResponse);
+            idempotentResponse = await Cache.Get(key);
+            idempotentResponse = new IdempotentResponse(key, idempotentResponse.Expiry, cachedResponse.Item1, cachedResponse.Item2, isProcessing);
+            await Cache.Save(key, idempotentResponse);
             return idempotentResponse;
         }
 

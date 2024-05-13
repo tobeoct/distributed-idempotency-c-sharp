@@ -1,44 +1,58 @@
-﻿using DistributedIdempotency.Behaviours;
+﻿using DistributedIdempotency.Data;
 using System.Collections.Concurrent;
 
 namespace DistributedIdempotency.Logic
 {
     public class IdempotencySyncJob
     {
-        private ConcurrentQueue<string> requests = new ConcurrentQueue<string>();
-        Timer timer;
+        private readonly ConcurrentQueue<string> Requests = new ConcurrentQueue<string>();
 
-        public IdempotencySyncJob()
+        readonly IDistributedCache SharedCache;
+        readonly ILocalCache LocalCache;
+
+        public IdempotencySyncJob(IDistributedCache cache, ILocalCache localCache)
         {
+            SharedCache = cache;
+            LocalCache = localCache;
             IdempotencyServiceImpl.SyncRequest += OnSyncRequested;
-            timer = new Timer(Sync, null, TimeSpan.Zero, TimeSpan.FromSeconds(5));
+            _ = new Timer(Sync, null, TimeSpan.Zero, TimeSpan.FromSeconds(5));
         }
 
         private void OnSyncRequested(object sender, string idempotencyKey)
         {
             // Log the duplicate idempotency key in the queue
-            requests.Enqueue(idempotencyKey);
+            Requests.Enqueue(idempotencyKey);
         }
 
         public void Sync(object state)
         {
-            var count = requests.Count;
-            while (count>0)
+            var count = Requests.Count;
+            while (count > 0)
             {
-                if (requests.TryDequeue(out string idempotencyKey))
+                if (Requests.TryDequeue(out string idempotencyKey))
                 {
                     // Process the duplicate idempotency key (e.g., sync with shared cache)
-                    SyncWithSharedCache(idempotencyKey);
+                    SyncWithSharedCacheAsync(idempotencyKey).Wait();
                 }
                 count -= 1;
             }
         }
 
-        private void SyncWithSharedCache(string idempotencyKey)
+        private async Task SyncWithSharedCacheAsync(string idempotencyKey)
         {
             // Logic to sync the duplicate idempotency key with the shared cache
             Console.WriteLine($"Syncing idempotency key '{idempotencyKey}' with shared cache...");
-            requests.Enqueue(idempotencyKey);
+
+            var response = await SharedCache.Get<IdempotentResponse>(idempotencyKey);
+
+            if (response == null)
+            {
+                Requests.Enqueue(idempotencyKey);
+                return;
+            }
+
+            await LocalCache.Save(idempotencyKey, response, response.Expiry);
+
         }
     }
 
