@@ -5,14 +5,14 @@ namespace DistributedIdempotency.Logic
 {
     public class IdempotencySyncJob
     {
-        private readonly ConcurrentQueue<string> Requests = new ConcurrentQueue<string>();
+        private readonly ConcurrentQueue<string> Requests = new();
 
-        readonly IDistributedCache SharedCache;
+        readonly IDistributedCache DistributedCache;
         readonly ILocalCache LocalCache;
 
-        public IdempotencySyncJob(IDistributedCache cache, ILocalCache localCache)
+        public IdempotencySyncJob(IDistributedCache distributedCache, ILocalCache localCache)
         {
-            SharedCache = cache;
+            DistributedCache = distributedCache;
             LocalCache = localCache;
             IdempotencyServiceImpl.SyncRequest += OnSyncRequested;
             _ = new Timer(Sync, null, TimeSpan.Zero, TimeSpan.FromSeconds(5));
@@ -24,28 +24,26 @@ namespace DistributedIdempotency.Logic
             Requests.Enqueue(idempotencyKey);
         }
 
-        public void Sync(object state)
+        private void Sync(object state)
         {
             var count = Requests.Count;
             while (count > 0)
             {
                 if (Requests.TryDequeue(out string idempotencyKey))
                 {
-                    // Process the duplicate idempotency key (e.g., sync with shared cache)
-                    SyncWithSharedCacheAsync(idempotencyKey).Wait();
+                    SyncWithDistributedCacheAsync(idempotencyKey).Wait();
                 }
                 count -= 1;
             }
         }
 
-        private async Task SyncWithSharedCacheAsync(string idempotencyKey)
+        private async Task SyncWithDistributedCacheAsync(string idempotencyKey)
         {
-            // Logic to sync the duplicate idempotency key with the shared cache
-            Console.WriteLine($"Syncing idempotency key '{idempotencyKey}' with shared cache...");
-
-            var response = await SharedCache.Get<IdempotentResponse>(idempotencyKey);
-
-            if (response == null)
+            Console.WriteLine($"Syncing idempotency key '{idempotencyKey}' with distributed cache...");
+            var value = await LocalCache.Get<IdempotentResponse>(idempotencyKey);
+            if (value?.IsProcessing == false) return;
+            var response = await DistributedCache.Get<IdempotentResponse>(idempotencyKey);
+            if (response?.IsProcessing == true)
             {
                 Requests.Enqueue(idempotencyKey);
                 return;

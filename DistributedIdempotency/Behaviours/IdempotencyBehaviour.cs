@@ -4,12 +4,7 @@ using DistributedIdempotency.Attributes;
 using System.Reflection;
 using DistributedIdempotency.Helpers;
 using DistributedIdempotency.Logic;
-using System.Collections.Concurrent;
 using Microsoft.AspNetCore.Http;
-using System.Text;
-using System.Runtime.InteropServices;
-using System;
-using System.Reflection.Metadata;
 using System.Diagnostics;
 
 namespace DistributedIdempotency.Behaviours
@@ -17,20 +12,16 @@ namespace DistributedIdempotency.Behaviours
     public class IdempotencyInterceptor : IActionFilter
     {
         private readonly IdempotencyService _idempotencyService;
-        private readonly string _defaultNamespace = typeof(IdempotencyInterceptor).Namespace;
-        static ConcurrentDictionary<string, Func<object[], string>> KeyExtractors = new ConcurrentDictionary<string, Func<object[], string>>();
-        DateTime NextExtractorRefresh;
+        Stopwatch _lifetimeStopwatch;
         public IdempotencyInterceptor(IdempotencyService idempotencyService)
         {
             _idempotencyService = idempotencyService;
-            NextExtractorRefresh = DateTime.Now.AddHours(1);
         }
 
-        Stopwatch stopwatch;
         public void OnActionExecuting(ActionExecutingContext context)
         {
-            stopwatch = new Stopwatch();
-            stopwatch.Start();
+            _lifetimeStopwatch = Stopwatch.StartNew();
+
             var idempotentAttribute = context.ActionDescriptor.EndpointMetadata
                 .OfType<IdempotentAttribute>()
                 .FirstOrDefault();
@@ -41,20 +32,10 @@ namespace DistributedIdempotency.Behaviours
                 if (!string.IsNullOrEmpty(idempotencyKey))
                 {
                     context.HttpContext.Items[Constants.IDEMPOTENCY_KEY] = idempotencyKey;
-
-                    var isDuplicate = _idempotencyService.CheckForDuplicateAsync(idempotencyKey).Result;
+                    var isDuplicate =  _idempotencyService.CheckForDuplicateAsync(idempotencyKey).Result;
                     if (isDuplicate)
                     {
-                        var response = _idempotencyService.GetResponseAsync(idempotencyKey, idempotentAttribute.TimeOut)?.Result;
-                        if (response?.Response == null) context.Result = new StatusCodeResult(StatusCodes.Status409Conflict);
-                        else
-                        {
-                            var result = new ObjectResult(response.Response)
-                            {
-                                StatusCode = response.StatusCode
-                            };
-                            context.Result = result;
-                        }
+                        ResolveDuplicate(context, idempotencyKey, idempotentAttribute.TimeOut);
                         return;
                     }
                     Run(() => _idempotencyService.UpsertAsync(idempotencyKey, window: idempotentAttribute.Window), idempotentAttribute.StrictMode).Wait();
@@ -62,22 +43,20 @@ namespace DistributedIdempotency.Behaviours
                 }
             }
 
-            stopwatch.Stop();
-            Console.WriteLine($"Idempotent API Performance: before action executes => {stopwatch.ElapsedMilliseconds}ms");
+            _lifetimeStopwatch.Stop();
+            Console.WriteLine($"Idempotent API Performance: before action executes => {_lifetimeStopwatch.ElapsedMilliseconds}ms");
         }
-
 
         string DetermineIdempotencyKey(ActionExecutingContext context)
         {
             var stopwatch = new Stopwatch();
             stopwatch.Start();
-            var key = DetermineIdempotencyKeyFromIdempotencyKeyAttribute(context);
-            //if (string.IsNullOrEmpty(key)) key = DetermineIdempotencyKeyFromIdempotentAttribute(idempotentAttribute, context);
+            var key = DetermineKeyFromAttribute(context);
             stopwatch.Stop();
             Console.WriteLine($"DetermineIdempotencyKey Performance: {stopwatch.ElapsedMilliseconds}ms");
             return key;
         }
-        string DetermineIdempotencyKeyFromIdempotencyKeyAttribute(ActionExecutingContext context)
+        string DetermineKeyFromAttribute(ActionExecutingContext context)
         {
 
             List<(string propertyName, int? order, object value)> keyComponents = [];
@@ -91,41 +70,12 @@ namespace DistributedIdempotency.Behaviours
 
             if (methodInfo != null)
             {
-                // Get the parameters of the action method
                 var parameters = methodInfo.GetParameters();
 
                 foreach (var parameter in parameters)
                 {
-                    if (parameter.ParameterType.IsClass && parameter.ParameterType != typeof(string))
-                    {
-                        PropertyInfo[] properties = parameter.ParameterType.GetProperties();
-
-                        foreach (PropertyInfo property in properties)
-                        {
-                            if (Attribute.IsDefined(property, typeof(IdempotencyKeyAttribute)))
-                            {
-                                var attribute = property.GetCustomAttributes(true)?
-                                    .OfType<IdempotencyKeyAttribute>()?
-                                    .FirstOrDefault();
-                                object propertyValue = property.GetValue(parameter);
-                                // Do something with the property value
-                                Console.WriteLine($"Property '{property.Name}' value: {propertyValue}");
-                                if (!keyComponents.Any(k => k.propertyName == property.Name)) keyComponents.Add((property.Name, attribute?.Order, propertyValue));
-                            }
-                        }
-                    }
-                    else
-                    {
-                        // Check if the parameter has the desired attribute
-                        var attribute = parameter.GetCustomAttribute<IdempotencyKeyAttribute>();
-                        if (attribute != null)
-                        {
-                            // Get the value of the parameter
-                            var parameterValue = context.ActionArguments[parameter.Name];
-                            Console.WriteLine($"Action argument '{parameter.Name}' value: {parameterValue}");
-                            if (!keyComponents.Any(k => k.propertyName == parameter.Name)) keyComponents.Add((parameter.Name, attribute?.Order, parameterValue));
-                        }
-                    }
+                    var components = ExtractKeyComponentsFromParameter(context, parameter);
+                    keyComponents.AddRange(components);
                 }
             }
 
@@ -134,37 +84,62 @@ namespace DistributedIdempotency.Behaviours
 
             return string.Join('.', orderedKeyComponents);
         }
-        string DetermineIdempotencyKeyFromIdempotentAttribute(IdempotentAttribute idempotentAttribute, ActionExecutingContext context)
+        static List<(string name, int? order, object value)> ExtractKeyComponentsFromParameter(ActionExecutingContext context, ParameterInfo parameter)
         {
-            if (DateTime.Now > NextExtractorRefresh) KeyExtractors = new ConcurrentDictionary<string, Func<object[], string>>();
-            if (idempotentAttribute == null) return string.Empty;
-
-            var keyExtractorNamespace = idempotentAttribute.KeyExtractorNamespace ?? _defaultNamespace;
-            var keyExtractorMethodName = idempotentAttribute.KeyExtractorMethodName;
-            var keyExtractorClassName = idempotentAttribute.KeyExtractorClassName;
-            var method = $"{keyExtractorNamespace}.{keyExtractorClassName}.{keyExtractorMethodName}";
-            KeyExtractors.TryGetValue(method, out var keyExtractor);
-            if (keyExtractor == null)
+            List<(string propertyName, int? order, object value)> keyComponents = [];
+            object? parameterValue;
+            IdempotencyKeyAttribute? attribute;
+            if (parameter.ParameterType.IsClass && parameter.ParameterType != typeof(string))
             {
-                keyExtractor = string.IsNullOrEmpty(keyExtractorMethodName)
-                ? DefaultKeyExtractor
-                : GetCustomKeyExtractor(keyExtractorNamespace, keyExtractorClassName, keyExtractorMethodName);
-                KeyExtractors.TryAdd(method, keyExtractor);
-            }
-            var arguments = context.ActionArguments.Values.ToArray();
-            return keyExtractor(arguments);
+                PropertyInfo[] properties = parameter.ParameterType.GetProperties();
+                _ = context.ActionArguments.TryGetValue(parameter.Name, out parameterValue);
+                if (parameterValue == null) return keyComponents;
 
+                foreach (PropertyInfo property in properties)
+                {
+                    if (!Attribute.IsDefined(property, typeof(IdempotencyKeyAttribute), false)) continue;
+
+                    attribute = property.GetCustomAttributes(true)?
+                       .OfType<IdempotencyKeyAttribute>()?
+                       .FirstOrDefault();
+                    object propertyValue = property.GetValue(parameterValue);
+                    keyComponents.Add((property.Name, attribute?.Order, propertyValue));
+                }
+                return keyComponents;
+
+            }
+
+            attribute = parameter.GetCustomAttribute<IdempotencyKeyAttribute>();
+            if (attribute == null) return keyComponents;
+
+            parameterValue = context.ActionArguments[parameter.Name];
+            keyComponents.Add((parameter.Name, attribute?.Order, parameterValue));
+            return keyComponents;
         }
+        void ResolveDuplicate(ActionExecutingContext context, string idempotencyKey, int timeout)
+        {
+            var response = _idempotencyService.GetResponseAsync(idempotencyKey, timeout)?.Result;
+            if (response?.Response == null) context.Result = new StatusCodeResult(StatusCodes.Status409Conflict);
+            else
+            {
+                var result = new ObjectResult(response.Response)
+                {
+                    StatusCode = response.StatusCode
+                };
+                context.Result = result;
+            }
+        }
+
+
         public void OnActionExecuted(ActionExecutedContext context)
         {
-            stopwatch.Restart();
+            _lifetimeStopwatch.Start();
             var idempotentAttribute = context.ActionDescriptor.EndpointMetadata
                 .OfType<IdempotentAttribute>()
                 .FirstOrDefault();
 
             if (idempotentAttribute != null)
             {
-
                 var idempotencyKey = context.HttpContext.Items[Constants.IDEMPOTENCY_KEY]?.ToString();
                 if (!string.IsNullOrEmpty(idempotencyKey))
                 {
@@ -172,37 +147,10 @@ namespace DistributedIdempotency.Behaviours
 
                 }
             }
-            stopwatch.Stop();
-            Console.WriteLine($"Idempotent API Performance: after action executes => {stopwatch.ElapsedMilliseconds}ms");
+            _lifetimeStopwatch.Stop();
+            Console.WriteLine($"Idempotent API Performance: after action executes => Total Time: {_lifetimeStopwatch.ElapsedMilliseconds}ms");
 
         }
-        private static Func<object[], string> GetCustomKeyExtractor(string targetNamespace, string targetClassName, string targetMethodName)
-        {
-            Type targetType = Type.GetType($"{targetNamespace}.{targetClassName}");
-
-            if (targetType != null)
-            {
-                MethodInfo targetMethod = targetType.GetMethod(targetMethodName, BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
-
-                if (targetMethod != null)
-                {
-                    var keyExtractorDelegate = (Func<object[], string>)Delegate.CreateDelegate(typeof(Func<object[], string>), null, targetMethod);
-                    return keyExtractorDelegate;
-                }
-
-                throw new ArgumentException($"Method '{targetMethodName}' not found in class '{targetClassName}'.");
-            }
-
-            throw new ArgumentException($"Class '{targetClassName}' not found in namespace '{targetNamespace}'.");
-
-        }
-
-        private string DefaultKeyExtractor(object[] args)
-        {
-
-            return ChecksumHelper.GetMD5Checksum(args);
-        }
-
         private static async Task Run(Func<Task> action, bool isStrict)
         {
             var stopwatch = new Stopwatch();
@@ -210,7 +158,7 @@ namespace DistributedIdempotency.Behaviours
             if (isStrict) await action();
             else action.Invoke();
             stopwatch.Stop();
-            Console.WriteLine($"Run Performance: {stopwatch.ElapsedMilliseconds}ms");
+            Console.WriteLine($"StrictMode:{Configuration.StrictMode} Run Performance: {stopwatch.ElapsedMilliseconds}ms");
 
         }
     }

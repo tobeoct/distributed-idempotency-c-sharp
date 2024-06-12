@@ -1,23 +1,42 @@
 ﻿using DistributedIdempotency.Behaviours;
 using DistributedIdempotency.Data;
+using DistributedIdempotency.Helpers;
 using DistributedIdempotency.Logic;
 using Microsoft.Extensions.DependencyInjection;
 namespace DistributedIdempotency
 {
     public static class Extension
     {
-        static bool IsJobRunning = false;
-        public static void RegisterIdempotencyDependencies(this IServiceCollection services, IDistributedCache cache, bool useStrictMode = true)
+        public static void RegisterIdempotencyDependencies(this IServiceCollection services, bool useStrictMode = true)
         {
-            services.AddScoped<ILocalCache, IdempotencyLocalCacheImpl>();
-            services.AddScoped<IdempotencyCache, IdempotencyCacheImpl>();
+            Configuration.StrictMode = useStrictMode;
+            services.AddSingleton<ILocalCache, IdempotencyLocalCacheImpl>();
+            services.AddSingleton<IdempotencyCache, IdempotencyCacheImpl>();
             services.AddScoped<IdempotencyService, IdempotencyServiceImpl>();
             services.AddScoped<IdempotencyInterceptor>();
-            IdempotencyCacheImpl.SetSharedCache(cache);
-            if (!IsJobRunning)
+            services.AddMemoryCache();
+            if (!services.Any(s => s.ServiceType == typeof(IDistributedCache)))
             {
-                Task.Run(() => new IdempotencySyncJob(cache, new IdempotencyLocalCacheImpl()).Sync(null));
-                IsJobRunning = true;
+                services.AddSingleton<IDistributedCache, IdempotencyStubDistributedCache>();
+            }
+
+            services.StartCacheSync();
+        }
+
+        public static void RegisterIdempotencyDependencies<TDistributedCache>(this IServiceCollection services, bool useStrictMode = true) where TDistributedCache : class, IDistributedCache
+        {
+            if (!services.Any(s => s.ServiceType == typeof(IDistributedCache)))
+            {
+                _ = services.AddSingleton<IDistributedCache, TDistributedCache>();
+            }
+            services.RegisterIdempotencyDependencies(useStrictMode);
+        }
+
+        public static void AddDistributedIdempotencyCache<TDistributedCache>(this IServiceCollection services) where TDistributedCache : class, IDistributedCache
+        {
+            if (!services.Any(s => s.ServiceType == typeof(IDistributedCache)))
+            {
+                _ = services.AddSingleton<IDistributedCache, TDistributedCache>();
             }
         }
 

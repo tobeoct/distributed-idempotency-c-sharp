@@ -1,5 +1,6 @@
 ﻿using DistributedIdempotency.Data;
 using Microsoft.AspNetCore.Mvc;
+using System.Diagnostics;
 
 namespace DistributedIdempotency.Logic
 {
@@ -15,7 +16,7 @@ namespace DistributedIdempotency.Logic
             Key = key;
             Expiry = expiry;
         }
-        public IdempotentResponse(string key, DateTime expiry, object response, int? statusCode, bool isProcessing)
+        public IdempotentResponse(string key, DateTime expiry, object? response, int? statusCode, bool isProcessing)
         {
             Key = key;
             Expiry = expiry;
@@ -25,7 +26,7 @@ namespace DistributedIdempotency.Logic
         }
         public string Key { get; init; }
         public DateTime Expiry { get; init; }
-        public object Response { get; init; }
+        public object? Response { get; init; }
         public int? StatusCode { get; init; }
         public bool IsProcessing { get; init; }
         public DateTime Timestamp { get; init; } = DateTime.Now;
@@ -45,19 +46,32 @@ namespace DistributedIdempotency.Logic
 
         public async Task<bool> CheckForDuplicateAsync(string key)
         {
+            var sw = Stopwatch.StartNew();
             var duplicateFound = await Cache.Contains(key);
             if (duplicateFound) OnSyncRequested(key);
+            sw.Stop();
+            Console.WriteLine($"Benchmark (CheckForDuplicateAsync): <{sw.ElapsedMilliseconds}ms>");
             return duplicateFound;
         }
         public async Task<IdempotentResponse> GetResponseAsync(string key, int timeoutInMilliseconds)
         {
-            var startTime = DateTime.Now;
-
-            while (await CheckForInitialResponseAsync(key, startTime, timeoutInMilliseconds))
+            var sw = Stopwatch.StartNew();
+            try
             {
-                Console.WriteLine($"Checking for duplicate's response for idempotency key '{key}' ...");
+                var startTime = DateTime.Now;
+
+                while (await CheckForInitialResponseAsync(key, startTime, timeoutInMilliseconds))
+                {
+                    Thread.Sleep(100);
+                    Console.WriteLine($"Checking for duplicate's response for idempotency key '{key}' ...");
+                }
+                return await Cache.Get(key);
             }
-            return await Cache.Get(key);
+            finally
+            {
+                sw.Stop();
+                Console.WriteLine($"Benchmark(GetResponseAsync): <{sw.ElapsedMilliseconds}ms>");
+            }
         }
 
         async Task<bool> CheckForInitialResponseAsync(string key, DateTime startTime, int timeoutInMilliseconds)
@@ -70,8 +84,9 @@ namespace DistributedIdempotency.Logic
         }
         public async Task<IdempotentResponse> UpsertAsync(string key, IActionResult result = null, bool isProcessing = true, int window = 30000)
         {
+            var sw = Stopwatch.StartNew();
             IdempotentResponse idempotentResponse;
-            (object, int?) cachedResponse = (null, null);
+            (object?, int?) cachedResponse = (null, null);
 
             if (result is ObjectResult objectResult)
             {
@@ -95,6 +110,8 @@ namespace DistributedIdempotency.Logic
             idempotentResponse = await Cache.Get(key);
             idempotentResponse = new IdempotentResponse(key, idempotentResponse.Expiry, cachedResponse.Item1, cachedResponse.Item2, isProcessing);
             await Cache.Save(key, idempotentResponse);
+            sw.Stop();
+            Console.WriteLine($"Benchmark(UpsertAsync): <{sw.ElapsedMilliseconds}ms>");
             return idempotentResponse;
         }
 

@@ -1,4 +1,5 @@
 ﻿using DistributedIdempotency.Logic;
+using Microsoft.Extensions.Caching.Memory;
 using System.Collections.Concurrent;
 
 namespace DistributedIdempotency.Data
@@ -29,68 +30,88 @@ namespace DistributedIdempotency.Data
             public DateTime Expiry { get; set; }
             public object Value { get; set; }
         }
-        static ConcurrentDictionary<string, CacheItem> Cache = new ConcurrentDictionary<string, CacheItem>();
+        IMemoryCache Cache;
+        public IdempotencyLocalCacheImpl(IMemoryCache cache)
+        {
+            Cache = cache;
+        }
 
         public Task<bool> Contains(string key)
         {
-            return Task.Run(() => Cache.ContainsKey(key));
+            return Task.Run(() => Cache.TryGetValue(key, out var value));
         }
 
-        public Task<T> Get<T>(string key)
+        public Task<T?> Get<T>(string key)
         {
-            if (Cache.ContainsKey(key) && DateTime.Now < Cache[key].Expiry) return Task.Run(() => (T)Cache[key].Value);
-            return default;
+            return Task.Run(() =>
+             {
+                 bool isFound = Cache.TryGetValue(key, out object? item);
+                 if (isFound) return (T)item;
+                 return default;
+             });
         }
 
         public Task<T> Save<T>(string key, T response, DateTime expiry)
         {
-            if (Cache.ContainsKey(key))
-            {
-                Cache[key] = new CacheItem() { Value = response, Expiry = expiry };
-            }
-            else
-            {
-                Cache.TryAdd(key, new CacheItem() { Value = response, Expiry = expiry });
-            }
-            return Task.Run(() => response);
+            return Task.Run(() => Cache.Set(key, response, expiry));
         }
 
         public Task Remove(string key)
         {
-            Cache.TryRemove(key, out var item);
+            Cache.Remove(key);
             return Task.CompletedTask;
         }
-    }
 
+
+    }
+    internal class IdempotencyStubDistributedCache : IDistributedCache
+    {
+        public Task<bool> Contains(string key)
+        {
+            return Task.FromResult(false);
+        }
+
+        public Task<T> Get<T>(string key)
+        {
+            return Task.FromResult<T>(default);
+        }
+
+        public Task Remove(string key)
+        {
+            return Task.CompletedTask;
+        }
+
+        public Task<T> Save<T>(string key, T response, DateTime expiry)
+        {
+            return Task.FromResult<T>(default);
+        }
+    }
     internal class IdempotencyCacheImpl : IdempotencyCache
     {
-        static IDistributedCache SharedCache;
+        static IDistributedCache DistributedCache;
         static ILocalCache LocalCache;
 
-        public static void SetSharedCache(IDistributedCache cache)
+        public IdempotencyCacheImpl(ILocalCache localCache, IDistributedCache distributedCache)
         {
-            SharedCache = cache;
-        }
-        public IdempotencyCacheImpl(ILocalCache cache)
-        {
-            LocalCache = cache;
+            LocalCache = localCache;
+            DistributedCache = distributedCache;
         }
         public async Task<IdempotentResponse> Get(string key)
         {
             if (await LocalCache.Contains(key)) return await LocalCache.Get<IdempotentResponse>(key);
-            if (await SharedCache?.Contains(key)) return await SharedCache.Get<IdempotentResponse>(key);
+            if (await DistributedCache.Contains(key)) return await DistributedCache.Get<IdempotentResponse>(key);
             return null;
         }
         public async Task<bool> Contains(string key)
         {
-            return await LocalCache.Contains(key) || (await SharedCache?.Contains(key));
+            return await LocalCache.Contains(key) || (await DistributedCache.Contains(key));
         }
         public async Task<IdempotentResponse> Save(string key, IdempotentResponse response)
         {
 
             await LocalCache.Save(key, response, response.Expiry);
 
-            await SharedCache.Save(key, response, response.Expiry);
+            await DistributedCache.Save(key, response, response.Expiry);
 
             return await LocalCache.Get<IdempotentResponse>(key);
         }
