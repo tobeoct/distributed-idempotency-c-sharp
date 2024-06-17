@@ -14,7 +14,7 @@ namespace DistributedIdempotency.Attributes
         /// The maximum duration(milliseconds) apart transactions needs to be before being considered as a duplicate
         /// </summary>
         public int Window { get; }
-        public bool StrictMode { get; }
+        internal bool StrictMode { get; }
 
         /// <summary>
         /// 
@@ -26,12 +26,6 @@ namespace DistributedIdempotency.Attributes
             Window = duplicateWindowInMilliseconds;
             TimeOut = timeOutInMilliseconds;
             StrictMode = Env.AppSettings.StrictMode;
-        }
-        public IdempotentAttribute(bool strictMode, int windowInMilliseconds = 300000, int timeOutInMilliseconds = 60000)
-        {
-            Window = windowInMilliseconds;
-            TimeOut = timeOutInMilliseconds;
-            StrictMode = strictMode;
         }
     }
 
