@@ -2,14 +2,16 @@
 using DistributedIdempotency.Data;
 using DistributedIdempotency.Helpers;
 using DistributedIdempotency.Logic;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+
 namespace DistributedIdempotency
 {
-    public static class Extension
+    public static class ServiceCollectionExtension
     {
-        public static void RegisterIdempotencyDependencies(this IServiceCollection services, bool useStrictMode = true)
+        public static void RegisterIdempotencyDependencies(this IServiceCollection services)
         {
-            Configuration.StrictMode = useStrictMode;
             services.AddSingleton<ILocalCache, IdempotencyLocalCacheImpl>();
             services.AddSingleton<IdempotencyCache, IdempotencyCacheImpl>();
             services.AddScoped<IdempotencyService, IdempotencyServiceImpl>();
@@ -23,22 +25,27 @@ namespace DistributedIdempotency
             services.StartCacheSync();
         }
 
-        public static void RegisterIdempotencyDependencies<TDistributedCache>(this IServiceCollection services, bool useStrictMode = true) where TDistributedCache : class, IDistributedCache
+        public static void RegisterIdempotencyDependencies<TDistributedCache>(this IServiceCollection services) where TDistributedCache : class, IDistributedCache
         {
-            if (!services.Any(s => s.ServiceType == typeof(IDistributedCache)))
-            {
-                _ = services.AddSingleton<IDistributedCache, TDistributedCache>();
-            }
-            services.RegisterIdempotencyDependencies(useStrictMode);
+
+            services.AddDistributedIdempotencyCache<TDistributedCache>();
+
+            services.RegisterIdempotencyDependencies();
         }
 
         public static void AddDistributedIdempotencyCache<TDistributedCache>(this IServiceCollection services) where TDistributedCache : class, IDistributedCache
         {
-            if (!services.Any(s => s.ServiceType == typeof(IDistributedCache)))
-            {
-                _ = services.AddSingleton<IDistributedCache, TDistributedCache>();
-            }
+            services.RemoveService<IDistributedCache>();
+            _ = services.AddSingleton<IDistributedCache, TDistributedCache>();
         }
 
+        public static void RemoveService<T>(this IServiceCollection services)
+        {
+            var serviceDescriptor = services.FirstOrDefault(descriptor => descriptor.ServiceType == typeof(T));
+            if (serviceDescriptor != null)
+            {
+                services.Remove(serviceDescriptor);
+            }
+        }
     }
 }

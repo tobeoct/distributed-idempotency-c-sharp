@@ -1,21 +1,25 @@
-﻿using DistributedIdempotency.Logic;
+﻿using DistributedIdempotency.Exceptions;
+using DistributedIdempotency.Helpers;
+using DistributedIdempotency.Logic;
 using Microsoft.Extensions.Caching.Memory;
-using System.Collections.Concurrent;
+using Microsoft.Extensions.Options;
 
 namespace DistributedIdempotency.Data
 {
-    public interface ICache
+    public interface IDistributedCache
     {
         Task<T> Get<T>(string key);
         Task<bool> Contains(string key);
         Task<T> Save<T>(string key, T response, DateTime expiry);
         Task Remove(string key);
+        Task<bool> IsHealthy();
     }
-    public interface IDistributedCache : ICache
+    public interface ILocalCache
     {
-    }
-    public interface ILocalCache : ICache
-    {
+        T? Get<T>(string key);
+        bool Contains(string key);
+        T Save<T>(string key, T response, DateTime expiry);
+        void Remove(string key);
     }
     internal interface IdempotencyCache
     {
@@ -36,30 +40,32 @@ namespace DistributedIdempotency.Data
             Cache = cache;
         }
 
-        public Task<bool> Contains(string key)
+        public bool Contains(string key)
         {
-            return Task.Run(() => Cache.TryGetValue(key, out var value));
+            Logger.Debug($"Checking local cache for key: {key}");
+            return Cache.TryGetValue(key, out var value);
         }
 
-        public Task<T?> Get<T>(string key)
+        public T? Get<T>(string key)
         {
-            return Task.Run(() =>
-             {
-                 bool isFound = Cache.TryGetValue(key, out object? item);
-                 if (isFound) return (T)item;
-                 return default;
-             });
+
+            Logger.Debug($"Retrieving item from local cache for key: {key}");
+            bool isFound = Cache.TryGetValue(key, out object? item);
+            if (isFound) return (T)item;
+            return default;
+
         }
 
-        public Task<T> Save<T>(string key, T response, DateTime expiry)
+        public T Save<T>(string key, T response, DateTime expiry)
         {
-            return Task.Run(() => Cache.Set(key, response, expiry));
+            Logger.Debug($"Saving item to local cache for key: {key}");
+            return Cache.Set(key, response, expiry);
         }
 
-        public Task Remove(string key)
+        public void Remove(string key)
         {
+            Logger.Debug($"Removing item from local cache for key: {key}");
             Cache.Remove(key);
-            return Task.CompletedTask;
         }
 
 
@@ -68,52 +74,87 @@ namespace DistributedIdempotency.Data
     {
         public Task<bool> Contains(string key)
         {
+            Logger.Debug($"Checking mock cache for key: {key}");
             return Task.FromResult(false);
         }
 
         public Task<T> Get<T>(string key)
         {
+            Logger.Debug($"Retrieving item from mock cache for key: {key}");
             return Task.FromResult<T>(default);
+        }
+
+        public Task<bool> IsHealthy()
+        {
+            return Task.FromResult(true);
         }
 
         public Task Remove(string key)
         {
+            Logger.Debug($"Removing item from mock cache for key: {key}");
             return Task.CompletedTask;
         }
 
         public Task<T> Save<T>(string key, T response, DateTime expiry)
         {
+            Logger.Debug($"Saving item to mock cache for key: {key}");
             return Task.FromResult<T>(default);
         }
     }
     internal class IdempotencyCacheImpl : IdempotencyCache
     {
-        static IDistributedCache DistributedCache;
-        static ILocalCache LocalCache;
+        readonly IDistributedCache DistributedCache;
+        readonly ILocalCache LocalCache;
+        public static bool IsDistributedCacheHealthy;
+        readonly Configuration? _config;
+        bool SkipDistributedCacheCheck => !IsDistributedCacheHealthy && !_config.StrictMode;
 
-        public IdempotencyCacheImpl(ILocalCache localCache, IDistributedCache distributedCache)
+        public IdempotencyCacheImpl(ILocalCache localCache, IDistributedCache distributedCache, IOptions<Configuration> options)
         {
             LocalCache = localCache;
             DistributedCache = distributedCache;
+            _config = options.Value ?? new Configuration();
         }
         public async Task<IdempotentResponse> Get(string key)
         {
-            if (await LocalCache.Contains(key)) return await LocalCache.Get<IdempotentResponse>(key);
-            if (await DistributedCache.Contains(key)) return await DistributedCache.Get<IdempotentResponse>(key);
+            var foundInLocal = LocalCache.Contains(key);
+            if (foundInLocal)
+            {
+                var item = LocalCache.Get<IdempotentResponse>(key);
+                return item;
+            }
+            if (SkipDistributedCacheCheck) return null;
+            ValidateHealth();
+            if (await DistributedCache.Contains(key))
+            {
+                Logger.Debug($"Retrieving item from distributed cache for key: {key}");
+                return await DistributedCache.Get<IdempotentResponse>(key);
+            }
             return null;
+        }
+        void ValidateHealth()
+        {
+            if (!IsDistributedCacheHealthy) throw new CacheException("Cache is currently unhealthy");
         }
         public async Task<bool> Contains(string key)
         {
-            return await LocalCache.Contains(key) || (await DistributedCache.Contains(key));
+            var foundInLocal = LocalCache.Contains(key);
+            if (SkipDistributedCacheCheck) return foundInLocal;
+            ValidateHealth();
+            return foundInLocal || (await DistributedCache.Contains(key));
         }
         public async Task<IdempotentResponse> Save(string key, IdempotentResponse response)
         {
 
-            await LocalCache.Save(key, response, response.Expiry);
+            LocalCache.Save(key, response, response.Expiry);
 
+            if (SkipDistributedCacheCheck) return LocalCache.Get<IdempotentResponse>(key);
+
+            ValidateHealth();
+            Logger.Debug($"Saving item to distributed cache for key: {key}");
             await DistributedCache.Save(key, response, response.Expiry);
 
-            return await LocalCache.Get<IdempotentResponse>(key);
+            return LocalCache.Get<IdempotentResponse>(key);
         }
 
     }

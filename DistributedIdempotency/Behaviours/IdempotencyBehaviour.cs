@@ -9,42 +9,45 @@ using System.Diagnostics;
 
 namespace DistributedIdempotency.Behaviours
 {
-    public class IdempotencyInterceptor : IActionFilter
+    public class IdempotencyInterceptor(IdempotencyService idempotencyService) : IActionFilter
     {
-        private readonly IdempotencyService _idempotencyService;
-        Stopwatch _lifetimeStopwatch;
-        public IdempotencyInterceptor(IdempotencyService idempotencyService)
-        {
-            _idempotencyService = idempotencyService;
-        }
-
+        private readonly IdempotencyService _idempotencyService = idempotencyService;
+        Stopwatch? _lifetimeStopwatch;
         public void OnActionExecuting(ActionExecutingContext context)
         {
-            _lifetimeStopwatch = Stopwatch.StartNew();
-
-            var idempotentAttribute = context.ActionDescriptor.EndpointMetadata
-                .OfType<IdempotentAttribute>()
-                .FirstOrDefault();
-
-            if (idempotentAttribute != null)
+            try
             {
-                var idempotencyKey = DetermineIdempotencyKey(context);
-                if (!string.IsNullOrEmpty(idempotencyKey))
+                _lifetimeStopwatch = Stopwatch.StartNew();
+
+                var idempotentAttribute = context.ActionDescriptor.EndpointMetadata
+                    .OfType<IdempotentAttribute>()
+                    .FirstOrDefault();
+
+                if (idempotentAttribute != null)
                 {
-                    context.HttpContext.Items[Constants.IDEMPOTENCY_KEY] = idempotencyKey;
-                    var isDuplicate =  _idempotencyService.CheckForDuplicateAsync(idempotencyKey).Result;
-                    if (isDuplicate)
+                    var idempotencyKey = DetermineIdempotencyKey(context);
+                    if (!string.IsNullOrEmpty(idempotencyKey))
                     {
-                        ResolveDuplicate(context, idempotencyKey, idempotentAttribute.TimeOut);
-                        return;
+                        context.HttpContext.Items[Constants.IDEMPOTENCY_KEY] = idempotencyKey;
+                        var isDuplicate = _idempotencyService.CheckForDuplicateAsync(idempotencyKey).Result;
+                        if (isDuplicate)
+                        {
+                            ResolveDuplicate(context, idempotencyKey, idempotentAttribute.TimeOut);
+                            return;
+                        }
+                        Run(() => _idempotencyService.UpsertAsync(idempotencyKey, window: idempotentAttribute.Window), idempotentAttribute.StrictMode).Wait();
+
                     }
-                    Run(() => _idempotencyService.UpsertAsync(idempotencyKey, window: idempotentAttribute.Window), idempotentAttribute.StrictMode).Wait();
-
                 }
-            }
 
-            _lifetimeStopwatch.Stop();
-            Console.WriteLine($"Idempotent API Performance: before action executes => {_lifetimeStopwatch.ElapsedMilliseconds}ms");
+                _lifetimeStopwatch.Stop();
+                Logger.Debug($"Idempotent API Performance: before action executes => {_lifetimeStopwatch.ElapsedMilliseconds}ms");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error(ex);
+                if (Env.AppSettings.StrictMode) throw;
+            }
         }
 
         string DetermineIdempotencyKey(ActionExecutingContext context)
@@ -53,7 +56,7 @@ namespace DistributedIdempotency.Behaviours
             stopwatch.Start();
             var key = DetermineKeyFromAttribute(context);
             stopwatch.Stop();
-            Console.WriteLine($"DetermineIdempotencyKey Performance: {stopwatch.ElapsedMilliseconds}ms");
+            Logger.Debug($"DetermineIdempotencyKey Performance: {stopwatch.ElapsedMilliseconds}ms");
             return key;
         }
         string DetermineKeyFromAttribute(ActionExecutingContext context)
@@ -133,22 +136,30 @@ namespace DistributedIdempotency.Behaviours
 
         public void OnActionExecuted(ActionExecutedContext context)
         {
-            _lifetimeStopwatch.Start();
-            var idempotentAttribute = context.ActionDescriptor.EndpointMetadata
-                .OfType<IdempotentAttribute>()
-                .FirstOrDefault();
-
-            if (idempotentAttribute != null)
+            try
             {
-                var idempotencyKey = context.HttpContext.Items[Constants.IDEMPOTENCY_KEY]?.ToString();
-                if (!string.IsNullOrEmpty(idempotencyKey))
-                {
-                    Run(() => _idempotencyService.UpsertAsync(idempotencyKey, context.Result, false, window: idempotentAttribute.Window), idempotentAttribute.StrictMode).Wait();
+                _lifetimeStopwatch.Start();
+                var idempotentAttribute = context.ActionDescriptor.EndpointMetadata
+                    .OfType<IdempotentAttribute>()
+                    .FirstOrDefault();
 
+                if (idempotentAttribute != null)
+                {
+                    var idempotencyKey = context.HttpContext.Items[Constants.IDEMPOTENCY_KEY]?.ToString();
+                    if (!string.IsNullOrEmpty(idempotencyKey))
+                    {
+                        Run(() => _idempotencyService.UpsertAsync(idempotencyKey, context.Result, false, window: idempotentAttribute.Window), idempotentAttribute.StrictMode).Wait();
+
+                    }
                 }
+                _lifetimeStopwatch.Stop();
+                Logger.Debug($"Idempotent API Performance: after action executes => Total Time: {_lifetimeStopwatch.ElapsedMilliseconds}ms");
             }
-            _lifetimeStopwatch.Stop();
-            Console.WriteLine($"Idempotent API Performance: after action executes => Total Time: {_lifetimeStopwatch.ElapsedMilliseconds}ms");
+            catch (Exception ex)
+            {
+                Logger.Error(ex);
+                if (Env.AppSettings.StrictMode) throw;
+            }
 
         }
         private static async Task Run(Func<Task> action, bool isStrict)
@@ -158,7 +169,7 @@ namespace DistributedIdempotency.Behaviours
             if (isStrict) await action();
             else action.Invoke();
             stopwatch.Stop();
-            Console.WriteLine($"StrictMode:{Configuration.StrictMode} Run Performance: {stopwatch.ElapsedMilliseconds}ms");
+            Logger.Debug($"StrictMode:{isStrict} Run Performance: {stopwatch.ElapsedMilliseconds}ms");
 
         }
     }

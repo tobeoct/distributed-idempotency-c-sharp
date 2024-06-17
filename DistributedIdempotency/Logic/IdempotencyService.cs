@@ -1,4 +1,5 @@
 ﻿using DistributedIdempotency.Data;
+using DistributedIdempotency.Helpers;
 using Microsoft.AspNetCore.Mvc;
 using System.Diagnostics;
 
@@ -50,7 +51,7 @@ namespace DistributedIdempotency.Logic
             var duplicateFound = await Cache.Contains(key);
             if (duplicateFound) OnSyncRequested(key);
             sw.Stop();
-            Console.WriteLine($"Benchmark (CheckForDuplicateAsync): <{sw.ElapsedMilliseconds}ms>");
+            Logger.Debug($"Benchmark (CheckForDuplicateAsync): <{sw.ElapsedMilliseconds}ms>");
             return duplicateFound;
         }
         public async Task<IdempotentResponse> GetResponseAsync(string key, int timeoutInMilliseconds)
@@ -59,25 +60,31 @@ namespace DistributedIdempotency.Logic
             try
             {
                 var startTime = DateTime.Now;
-
-                while (await CheckForInitialResponseAsync(key, startTime, timeoutInMilliseconds))
+                var waitForResponse = true;
+                while (waitForResponse)
                 {
                     Thread.Sleep(100);
-                    Console.WriteLine($"Checking for duplicate's response for idempotency key '{key}' ...");
+                    Logger.Debug($"Checking for duplicate's response for idempotency key '{key}' ...");
+                    waitForResponse = await ShouldWaitForResponseAsync(key, startTime, timeoutInMilliseconds);
                 }
                 return await Cache.Get(key);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error(ex);
+                return null;
             }
             finally
             {
                 sw.Stop();
-                Console.WriteLine($"Benchmark(GetResponseAsync): <{sw.ElapsedMilliseconds}ms>");
+                Logger.Debug($"Benchmark(GetResponseAsync): <{sw.ElapsedMilliseconds}ms>");
             }
         }
 
-        async Task<bool> CheckForInitialResponseAsync(string key, DateTime startTime, int timeoutInMilliseconds)
+        async Task<bool> ShouldWaitForResponseAsync(string key, DateTime startTime, int timeoutInMilliseconds)
         {
             var cache = await Cache.Get(key);
-            var isInitialTransactionStillProcessing = (cache?.IsProcessing ?? false);// && cache?.Response == null;
+            var isInitialTransactionStillProcessing = cache?.IsProcessing ?? false;
             var isExpired = DateTime.Now < cache?.Expiry;
             var isWithinDuplicateWindow = DateTime.Now < startTime.AddMilliseconds(timeoutInMilliseconds);
             return isInitialTransactionStillProcessing && isWithinDuplicateWindow && isExpired;
@@ -111,7 +118,7 @@ namespace DistributedIdempotency.Logic
             idempotentResponse = new IdempotentResponse(key, idempotentResponse.Expiry, cachedResponse.Item1, cachedResponse.Item2, isProcessing);
             await Cache.Save(key, idempotentResponse);
             sw.Stop();
-            Console.WriteLine($"Benchmark(UpsertAsync): <{sw.ElapsedMilliseconds}ms>");
+            Logger.Debug($"Benchmark(UpsertAsync): <{sw.ElapsedMilliseconds}ms>");
             return idempotentResponse;
         }
 

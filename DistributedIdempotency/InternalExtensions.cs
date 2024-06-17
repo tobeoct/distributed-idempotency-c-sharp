@@ -21,6 +21,7 @@ namespace DistributedIdempotency
                 var provider = services.BuildServiceProvider();
                 var memoryCache = provider.GetRequiredService<IMemoryCache>();
                 var cache = provider.GetRequiredService<IDistributedCache>();
+                IdempotencyCacheImpl.IsDistributedCacheHealthy = true;
                 Task.Run(() => new IdempotencySyncJob(cache, new IdempotencyLocalCacheImpl(memoryCache)));
                 IsJobRunning = true;
             }

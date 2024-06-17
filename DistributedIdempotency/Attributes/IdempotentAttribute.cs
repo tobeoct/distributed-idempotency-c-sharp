@@ -19,13 +19,13 @@ namespace DistributedIdempotency.Attributes
         /// <summary>
         /// 
         /// </summary>
-        /// <param name="windowInMilliseconds">The maximum duration apart transactions needs to be before being considered as a duplicate. Default is 5mins</param>
+        /// <param name="windowInMilliseconds">The maximum duration apart that transactions needs to be before being considered as a duplicate. Default is 5mins</param>
         /// <param name="timeOutInMilliseconds">How long a duplicate request should wait for a response before returning a conflict status code. Default is 1min</param>
         public IdempotentAttribute(int duplicateWindowInMilliseconds = 300000, int timeOutInMilliseconds = 60000)
         {
             Window = duplicateWindowInMilliseconds;
             TimeOut = timeOutInMilliseconds;
-            StrictMode = Configuration.StrictMode;
+            StrictMode = Env.AppSettings.StrictMode;
         }
         public IdempotentAttribute(bool strictMode, int windowInMilliseconds = 300000, int timeOutInMilliseconds = 60000)
         {

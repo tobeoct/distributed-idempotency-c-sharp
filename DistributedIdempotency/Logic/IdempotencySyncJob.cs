@@ -1,4 +1,5 @@
 ﻿using DistributedIdempotency.Data;
+using DistributedIdempotency.Helpers;
 using System.Collections.Concurrent;
 
 namespace DistributedIdempotency.Logic
@@ -9,13 +10,13 @@ namespace DistributedIdempotency.Logic
 
         readonly IDistributedCache DistributedCache;
         readonly ILocalCache LocalCache;
-
         public IdempotencySyncJob(IDistributedCache distributedCache, ILocalCache localCache)
         {
             DistributedCache = distributedCache;
             LocalCache = localCache;
             IdempotencyServiceImpl.SyncRequest += OnSyncRequested;
             _ = new Timer(Sync, null, TimeSpan.Zero, TimeSpan.FromSeconds(5));
+            _ = new Timer(CacheHealthCheck, null, TimeSpan.Zero, TimeSpan.FromSeconds(5));
         }
 
         private void OnSyncRequested(object sender, string idempotencyKey)
@@ -37,10 +38,14 @@ namespace DistributedIdempotency.Logic
             }
         }
 
+        private void CacheHealthCheck(object state)
+        {
+            IdempotencyCacheImpl.IsDistributedCacheHealthy = DistributedCache.IsHealthy().Result;
+        }
         private async Task SyncWithDistributedCacheAsync(string idempotencyKey)
         {
-            Console.WriteLine($"Syncing idempotency key '{idempotencyKey}' with distributed cache...");
-            var value = await LocalCache.Get<IdempotentResponse>(idempotencyKey);
+            Logger.Debug($"Syncing idempotency key '{idempotencyKey}' with distributed cache...");
+            var value = LocalCache.Get<IdempotentResponse>(idempotencyKey);
             if (value?.IsProcessing == false) return;
             var response = await DistributedCache.Get<IdempotentResponse>(idempotencyKey);
             if (response?.IsProcessing == true)
@@ -49,7 +54,7 @@ namespace DistributedIdempotency.Logic
                 return;
             }
 
-            await LocalCache.Save(idempotencyKey, response, response.Expiry);
+            LocalCache.Save(idempotencyKey, response, response.Expiry);
 
         }
     }

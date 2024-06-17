@@ -2,8 +2,9 @@
 
 namespace DistributedIdempotency.Helpers
 {
-    internal static class Configuration
+    internal class Configuration
     {
-        public static bool StrictMode { get; set; }
+        public const string Key = "DistributedIdempotency";
+        public bool StrictMode { get; set; } = true;
     }
 }

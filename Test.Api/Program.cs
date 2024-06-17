@@ -5,6 +5,9 @@ using Distributed = Microsoft.Extensions.Caching.Distributed;
 using System.Text.Json;
 using IDistributedCache = DistributedIdempotency.Data.IDistributedCache;
 using DistributedIdempotency.Behaviours;
+using DistributedIdempotency.Data;
+using Microsoft.Extensions.Configuration;
+
 namespace Test.Api
 {
 
@@ -64,6 +67,27 @@ namespace Test.Api
             }
         }
 
+        public async Task<bool> IsHealthy()
+        {
+            try
+            {
+                var testKey = "HealthCheckKey";
+                var testValue = "HealthCheckValue";
+
+                await Cache.SetStringAsync(testKey, testValue, new DistributedCacheEntryOptions
+                {
+                    AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(30)
+                });
+
+                var value = await Cache.GetStringAsync(testKey);
+
+                return value == testValue;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
     }
     public class Program
     {
